@@ -6,6 +6,7 @@ from fastapi import FastAPI, File, HTTPException, Query, UploadFile
 from data_pipeline import create_cleaning_report, process_data, validate_dataframe
 from src import (
     HealthResponse,
+    MovieCache,
     MovieStorage,
     MovieUploadInfo,
     MovieDataResponse,
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(title="Movie Database API", version="1.0.0")
 app.middleware("http")(log_requests)
 storage = MovieStorage()
+cache = MovieCache()
 
 @app.get("/health", response_model=HealthResponse)
 def health_check():
@@ -66,6 +68,7 @@ async def upload_movies(file: UploadFile = File(...)):
     df = df[MOVIE_COLUMNS]
 
     storage.save(df)
+    cache.invalidate()
     logger.info(f"Uploaded movies: filename={file.filename}, rows={len(df)}")
     return {
         "filename": file.filename,
@@ -77,10 +80,16 @@ async def upload_movies(file: UploadFile = File(...)):
 @app.get("/movies", response_model=MovieDataResponse)
 def get_movies(limit: int = Query(default=100, ge=1)):
     """Return up to limit stored movies and the total number of movies."""
+    cached = cache.get(limit)
+    if cached is not None:
+        logger.info(f"Cache hit for movies: limit={limit}")
+        return cached
+
     records = storage.select_columns(MOVIE_COLUMNS, limit=limit)
     total_rows = storage.count_movies()
     response = {"data": records, "total_rows": total_rows}
 
+    cache.set(limit, response)
     logger.info(f"Retrieved movies: returned_rows={len(records)}")
     return response
 
@@ -139,6 +148,7 @@ def process_movies(config: ProcessConfig):
         raise HTTPException(status_code=400, detail=str(error))
 
     storage.save(processed)
+    cache.invalidate()
     logger.info(
         f"Processed movies: validation_removed={validation_rows_removed}, "
         f"rows_before={cleaning_report['rows_before']}, rows_after={cleaning_report['rows_after']}"
